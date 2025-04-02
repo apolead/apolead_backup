@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -11,6 +12,7 @@ const Login = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -18,9 +20,106 @@ const Login = () => {
     const checkSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
-        // If already logged in, redirect to dashboard
-        navigate('/dashboard');
+        console.log("Login - Found existing session, checking credentials");
+        
+        // First check if we have cached credentials (fastest route)
+        try {
+          const cachedData = localStorage.getItem('tempCredentials');
+          if (cachedData) {
+            const { userId, credentials, timestamp } = JSON.parse(cachedData);
+            // Check if cache is valid (30 minutes validity)
+            const isValid = Date.now() - timestamp < 30 * 60 * 1000;
+            
+            if (isValid && userId === session.user.id) {
+              console.log('Login - Using cached credentials:', credentials);
+              if (credentials === 'supervisor') {
+                navigate('/supervisor', { replace: true });
+                return;
+              } else {
+                navigate('/dashboard', { replace: true });
+                return;
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing cached credentials:', e);
+          localStorage.removeItem('tempCredentials');
+        }
+        
+        // If no valid cache, try using the is_supervisor function (most reliable)
+        try {
+          console.log('Checking supervisor status for user ID:', session.user.id);
+          const { data: isSupervisor, error: supervisorError } = await supabase.rpc('is_supervisor', {
+            check_user_id: session.user.id
+          });
+          
+          if (supervisorError) {
+            console.error('Supervisor check error:', supervisorError);
+            // Fall back to the get_user_credentials if is_supervisor fails
+          } else {
+            console.log('Login checkSession - Is supervisor:', isSupervisor);
+            
+            // Cache the credentials
+            localStorage.setItem('tempCredentials', JSON.stringify({
+              userId: session.user.id,
+              credentials: isSupervisor ? 'supervisor' : 'agent',
+              timestamp: Date.now()
+            }));
+            
+            if (isSupervisor) {
+              console.log('Navigating to supervisor dashboard');
+              navigate('/supervisor', { replace: true });
+              setIsCheckingSession(false);
+              return;
+            } else {
+              console.log('Navigating to regular dashboard');
+              navigate('/dashboard', { replace: true });
+              setIsCheckingSession(false);
+              return;
+            }
+          }
+        } catch (error) {
+          console.error('Error checking supervisor status:', error);
+          // Continue to the next approach
+        }
+        
+        // If that fails too, fetch from API as last resort
+        try {
+          console.log('Fetching credentials for user ID:', session.user.id);
+          const { data, error } = await (supabase.rpc as any)('get_user_credentials', {
+            user_id: session.user.id
+          });
+          
+          if (error) {
+            console.error('RPC error:', error);
+            throw error;
+          }
+          
+          console.log('Login checkSession - User credentials:', data);
+          
+          // Cache the credentials
+          localStorage.setItem('tempCredentials', JSON.stringify({
+            userId: session.user.id,
+            credentials: data,
+            timestamp: Date.now()
+          }));
+          
+          if (data === 'supervisor') {
+            console.log('Navigating to supervisor dashboard');
+            navigate('/supervisor', { replace: true });
+          } else {
+            console.log('Navigating to regular dashboard');
+            navigate('/dashboard', { replace: true });
+          }
+        } catch (error) {
+          console.error('Error checking user credentials:', error);
+          // Even if we have an error, still redirect the user somewhere
+          setTimeout(() => {
+            navigate('/dashboard', { replace: true }); // Fallback to dashboard
+          }, 100);
+        }
       }
+      setIsCheckingSession(false);
     };
     
     checkSession();
@@ -63,14 +162,119 @@ const Login = () => {
       });
 
       if (error) throw error;
-
+      
       toast({
         title: "Login successful",
         description: "Welcome back!"
       });
 
-      // Simplified redirect - always go to dashboard
-      navigate('/dashboard');
+      // Check user credentials and redirect accordingly
+      try {
+        // First try the is_supervisor function (most reliable)
+        const { data: isSupervisor, error: supervisorError } = await supabase.rpc('is_supervisor', {
+          check_user_id: data.user.id
+        });
+        
+        if (supervisorError) {
+          console.error('Supervisor check error:', supervisorError);
+          // Fall back to the get_user_credentials if is_supervisor fails
+        } else {
+          console.log('Login successful - Is supervisor:', isSupervisor);
+          
+          // Cache the credentials
+          localStorage.setItem('tempCredentials', JSON.stringify({
+            userId: data.user.id,
+            credentials: isSupervisor ? 'supervisor' : 'agent',
+            timestamp: Date.now()
+          }));
+          
+          if (isSupervisor) {
+            console.log('Redirecting to supervisor dashboard');
+            navigate('/supervisor', { replace: true });
+            return;
+          } else {
+            console.log('Redirecting to regular dashboard');
+            navigate('/dashboard', { replace: true });
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking supervisor status:', error);
+        // Continue to the next approach if this fails
+      }
+        
+      // Try with regular get_user_credentials as fallback
+      try {
+        // Make multiple attempts with timeouts to ensure we get a valid credential check
+        let attempts = 0;
+        const maxAttempts = 3;
+        const checkCredentials = async () => {
+          try {
+            console.log('Checking credentials for user ID:', data.user.id);
+            const { data: credentialData, error: credentialError } = await (supabase.rpc as any)('get_user_credentials', {
+              user_id: data.user.id
+            });
+            
+            if (credentialError) {
+              console.error('RPC error:', credentialError);
+              throw credentialError;
+            }
+            
+            console.log('Login successful - User credentials:', credentialData);
+            
+            // Cache the credentials in localStorage for faster access
+            localStorage.setItem('tempCredentials', JSON.stringify({
+              userId: data.user.id,
+              credentials: credentialData,
+              timestamp: Date.now()
+            }));
+            
+            // Force caching the credentials in localStorage to avoid any RLS issues
+            if (credentialData) {
+              const cachedProfile = localStorage.getItem('userProfile');
+              if (cachedProfile) {
+                try {
+                  const profile = JSON.parse(cachedProfile);
+                  profile.credentials = credentialData;
+                  localStorage.setItem('userProfile', JSON.stringify(profile));
+                  console.log('Updated credentials in cached profile');
+                } catch (error) {
+                  console.error('Error updating cached profile:', error);
+                }
+              }
+            }
+            
+            if (credentialData === 'supervisor') {
+              // Redirect with delay to ensure all state updates are processed
+              console.log('Redirecting to supervisor dashboard');
+              navigate('/supervisor', { replace: true });
+            } else {
+              console.log('Redirecting to regular dashboard');
+              navigate('/dashboard', { replace: true });
+            }
+          } catch (error) {
+            console.error(`Error getting user credentials (attempt ${attempts+1}/${maxAttempts}):`, error);
+            attempts++;
+            if (attempts < maxAttempts) {
+              // Try again after a short delay
+              setTimeout(checkCredentials, 500);
+            } else {
+              // After max attempts, default to dashboard
+              console.log('Max credential check attempts reached, defaulting to dashboard');
+              navigate('/dashboard', { replace: true });
+            }
+          }
+        };
+        
+        // Start the credential check process
+        checkCredentials();
+        
+      } catch (error) {
+        console.error('Error getting user credentials:', error);
+        setTimeout(() => {
+          navigate('/dashboard', { replace: true });
+        }, 500);
+      }
     } catch (error) {
       console.error('Login error:', error);
       toast({
@@ -81,6 +285,15 @@ const Login = () => {
       setIsLoading(false);
     }
   };
+
+  if (isCheckingSession) {
+    return <div className="flex items-center justify-center h-screen">
+      <div className="flex flex-col items-center gap-2">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <div className="text-lg font-medium">Checking session...</div>
+      </div>
+    </div>;
+  }
 
   return <div className="flex flex-col md:flex-row w-full h-screen">
       <div className="hidden md:block w-full md:w-1/2 bg-[#1A1F2C] text-white relative p-8 md:p-16 flex flex-col justify-between overflow-hidden">
